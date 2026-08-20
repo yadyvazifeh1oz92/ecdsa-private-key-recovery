@@ -9,7 +9,7 @@ from pathlib import Path
 from tests import test_ecdsa_key_recovery
 
 
-test_ecdsa_key_recovery.run_sync(FORCE_SYNC=True)
+test_ecdsa_key_recovery.run_sync()
 
 
 def _banner() -> Panel:
